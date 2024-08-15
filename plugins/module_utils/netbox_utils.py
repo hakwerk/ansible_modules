@@ -24,6 +24,7 @@ PYNETBOX_IMP_ERR = None
 try:
     import pynetbox
     import requests
+    from requests.adapters import HTTPAdapter, Retry
 
     HAS_PYNETBOX = True
 except ImportError:
@@ -696,6 +697,8 @@ NETBOX_ARG_SPEC = dict(
     query_params=dict(required=False, type="list", elements="str"),
     validate_certs=dict(type="raw", default=True),
     cert=dict(type="raw", required=False),
+    retries=dict(type="int", required=False),
+    timeout=dict(type="int", required=False),
 )
 
 
@@ -724,10 +727,12 @@ class NetboxModule(object):
         token = self.module.params["netbox_token"]
         ssl_verify = self.module.params["validate_certs"]
         cert = self.module.params["cert"]
+        retries = self.module.params["retries"]
+        timeout = self.module.params["timeout"]
 
         # Attempt to initiate connection to NetBox
         if nb_client is None:
-            self.nb = self._connect_netbox_api(url, token, ssl_verify, cert)
+            self.nb = self._connect_netbox_api(url, token, ssl_verify, cert, retries, timeout)
         else:
             self.nb = nb_client
             try:
@@ -777,12 +782,21 @@ class NetboxModule(object):
 
         return False
 
-    def _connect_netbox_api(self, url, token, ssl_verify, cert):
+    def _connect_netbox_api(self, url, token, ssl_verify, cert, retries=1, timeout=5):
         try:
             session = requests.Session()
             session.verify = ssl_verify
             if cert:
                 session.cert = tuple(i for i in cert)
+            retry_strategy = Retry(
+                total=retries,
+                backoff_factor=2,
+                status_forcelist=[429, 500, 502, 503, 504],
+                method_whitelist=["HEAD", "GET", "OPTIONS"],
+            )
+            adapter = TimeoutHTTPAdapter(timeout=timeout, max_retries=retry_strategy)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
             nb = pynetbox.api(url, token=token)
             nb.http_session = session
             try:
@@ -1806,3 +1820,20 @@ class NetboxAnsibleModule(AnsibleModule):
             terms = [terms]
 
         return len(set(terms).intersection(module_parameters))
+
+
+DEFAULT_TIMEOUT = 5 # seconds
+
+class TimeoutHTTPAdapter(HTTPAdapter):
+    def __init__(self, *args, **kwargs):
+        self.timeout = DEFAULT_TIMEOUT
+        if "timeout" in kwargs:
+            self.timeout = kwargs["timeout"]
+            del kwargs["timeout"]
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        timeout = kwargs["timeout"]
+        if timeout is None:
+            kwargs["timeout"] = self.timeout
+        return super().send(request, **kwargs)
